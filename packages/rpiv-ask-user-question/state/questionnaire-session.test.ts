@@ -1,5 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { TUI } from "@earendil-works/pi-tui";
+import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { makeTheme } from "@juicesharp/rpiv-test-utils";
 import { describe, expect, it, vi } from "vitest";
 import type { QuestionnaireResult, QuestionParams } from "../tool/types.js";
@@ -14,6 +14,8 @@ const CTRL_G = "\x07";
 const CTRL_U = "\x15";
 const SHIFT_ENTER = "\x1b\r";
 const TAB = "\t";
+const PAGE_UP = "\x1b[5~";
+const PAGE_DOWN = "\x1b[6~";
 
 const params: QuestionParams = {
 	questions: [
@@ -60,6 +62,10 @@ const keybindings = {
 				return data === CTRL_U;
 			case "app.editor.external":
 				return data === CTRL_G;
+			case "tui.altScreen.pageUp":
+				return data === PAGE_UP;
+			case "tui.altScreen.pageDown":
+				return data === PAGE_DOWN;
 			default:
 				return false;
 		}
@@ -76,8 +82,9 @@ interface SessionTestOptions {
 function makeSession(options: SessionTestOptions = {}) {
 	const sessionParams = options.params ?? params;
 	const done = vi.fn<(result: QuestionnaireResult) => void>();
+	const scrollBy = vi.fn();
 	const session = new QuestionnaireSession({
-		tui: { terminal: { columns: 120, rows: 40 }, requestRender: vi.fn() } as unknown as TUI,
+		tui: { terminal: { columns: 120, rows: 40 }, requestRender: vi.fn(), scrollBy } as unknown as TUI,
 		theme: makeTheme() as unknown as Theme,
 		params: sessionParams,
 		itemsByTab: options.itemsByTab ?? itemsFor(sessionParams),
@@ -87,7 +94,7 @@ function makeSession(options: SessionTestOptions = {}) {
 		collapseKey: "off",
 		canReopenWhileHidden: false,
 	});
-	return { session, done };
+	return { session, done, scrollBy };
 }
 
 function focusCustomAnswer(session: QuestionnaireSession): void {
@@ -295,6 +302,40 @@ describe("QuestionnaireSession — custom-answer drafts", () => {
 
 		session.dispatch(TAB);
 		expect(session.component.render(120).join("\n")).toContain("second");
+	});
+});
+
+describe("QuestionnaireSession — transcript scroll passthrough", () => {
+	it("forwards PageUp/PageDown to the fullscreen transcript without changing answers", () => {
+		const { session, done, scrollBy } = makeSession();
+		session.dispatch(PAGE_DOWN);
+		session.dispatch(PAGE_UP);
+		// rows: 40 → one page is 39 lines.
+		expect(scrollBy.mock.calls).toEqual([[39], [-39]]);
+		expect(done).not.toHaveBeenCalled();
+	});
+
+	it("sizes a page by the transcript area left uncovered by the dialog", () => {
+		const { session, scrollBy } = makeSession();
+		session.setOverlayHandle({
+			getBounds: () => ({ row: 20, col: 0, width: 100, height: 20 }),
+		} as unknown as OverlayHandle);
+		session.dispatch(PAGE_DOWN);
+		session.dispatch(PAGE_UP);
+		// 20 uncovered rows, minus one row of overlap — not the full 40-row terminal.
+		expect(scrollBy.mock.calls).toEqual([[19], [-19]]);
+	});
+
+	it("keeps dialog navigation and confirmation working around the scroll keys", () => {
+		const { session, done, scrollBy } = makeSession();
+		session.dispatch(PAGE_DOWN);
+		session.dispatch(DOWN);
+		session.dispatch(ENTER);
+		expect(scrollBy).toHaveBeenCalledWith(39);
+		expect(done).toHaveBeenCalledWith({
+			answers: [expect.objectContaining({ kind: "option", answer: "B" })],
+			cancelled: false,
+		});
 	});
 });
 

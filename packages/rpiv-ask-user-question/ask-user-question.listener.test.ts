@@ -25,6 +25,8 @@ const KITTY_CTRL_RBRACKET_PRESS = "\x1b[93;5u";
 const KITTY_CTRL_RBRACKET_REPEAT = "\x1b[93;5:2u";
 const KITTY_CTRL_RBRACKET_RELEASE = "\x1b[93;5:3u";
 const ALT_O = "\x1bo"; // ESC-prefixed 'o' — legacy encoding for Alt+O
+const SGR_WHEEL_UP = "\x1b[<64;10;5M"; // SGR mouse: wheel up (button 64)
+const SGR_WHEEL_DOWN = "\x1b[<65;10;5M"; // SGR mouse: wheel down (button 65)
 
 const params = {
 	questions: [
@@ -63,6 +65,10 @@ function makeHandle(over: { isFocused?: () => boolean } = {}): FakeHandle {
 
 type RawListener = (data: string) => { consume?: boolean } | undefined;
 type SessionComponent = { render(width: number): string[]; handleInput(data: string): void };
+type SessionKeybindings = { matches(data: string, name: string): boolean };
+
+/** No-op keybindings for the listener tests, which drive only the raw listener path. */
+const noKeybindings: SessionKeybindings = { matches: () => false };
 
 function register() {
 	const { pi, captured } = createMockPi();
@@ -78,6 +84,7 @@ function register() {
 function driveWithListener(handle: FakeHandle, script: (done: (v: unknown) => void) => void) {
 	const notify = vi.fn();
 	const removeListener = vi.fn();
+	const scrollBy = vi.fn();
 	const listenerRef: { current: RawListener | undefined } = { current: undefined };
 	const componentRef: { current: SessionComponent | undefined } = { current: undefined };
 	const onTerminalInput = vi.fn((h: RawListener) => {
@@ -87,18 +94,22 @@ function driveWithListener(handle: FakeHandle, script: (done: (v: unknown) => vo
 	const custom = vi.fn(
 		(
 			factory: (
-				tui: { requestRender: () => void; terminal: { columns: number; rows: number } },
+				tui: {
+					requestRender: () => void;
+					terminal: { columns: number; rows: number };
+					scrollBy: (lines: number) => void;
+				},
 				theme: typeof identityTheme,
-				kb: undefined,
+				kb: SessionKeybindings,
 				done: (v: unknown) => void,
 			) => unknown,
 			options?: { onHandle?: (handle: FakeHandle) => void },
 		) => {
 			return new Promise((resolve) => {
 				componentRef.current = factory(
-					{ requestRender: vi.fn(), terminal: { columns: 120, rows: 24 } },
+					{ requestRender: vi.fn(), terminal: { columns: 120, rows: 24 }, scrollBy },
 					identityTheme,
-					undefined,
+					noKeybindings,
 					resolve,
 				) as SessionComponent;
 				options?.onHandle?.(handle);
@@ -107,7 +118,7 @@ function driveWithListener(handle: FakeHandle, script: (done: (v: unknown) => vo
 		},
 	);
 	const ctx = { hasUI: true, ui: { custom, onTerminalInput, notify } } as never;
-	return { ctx, notify, onTerminalInput, removeListener, listenerRef, componentRef };
+	return { ctx, notify, onTerminalInput, removeListener, listenerRef, componentRef, scrollBy };
 }
 
 const home = process.env.HOME ?? "";
@@ -205,18 +216,22 @@ describe("ask_user_question — raw terminal collapse listener", () => {
 		const custom = vi.fn(
 			(
 				factory: (
-					tui: { requestRender: () => void; terminal: { columns: number; rows: number } },
+					tui: {
+						requestRender: () => void;
+						terminal: { columns: number; rows: number };
+						scrollBy: (lines: number) => void;
+					},
 					theme: typeof identityTheme,
-					kb: undefined,
+					kb: SessionKeybindings,
 					done: (v: unknown) => void,
 				) => unknown,
 				options?: { onHandle?: (handle: FakeHandle) => void },
 			) => {
 				return new Promise((resolve) => {
 					componentRef.current = factory(
-						{ requestRender: vi.fn(), terminal: { columns: 120, rows: 24 } },
+						{ requestRender: vi.fn(), terminal: { columns: 120, rows: 24 }, scrollBy: vi.fn() },
 						identityTheme,
-						undefined,
+						noKeybindings,
 						resolve,
 					) as SessionComponent;
 					options?.onHandle?.(handle);
@@ -269,18 +284,49 @@ describe("ask_user_question — raw terminal collapse listener", () => {
 		await tool.execute?.("tc", params as never, undefined as never, undefined as never, ctx);
 	});
 
-	it("does not register a listener when collapseKey is 'off'", async () => {
+	it("does not collapse on the configured shortcut when collapseKey is 'off', but still registers for wheel passthrough", async () => {
 		writeCollapseKeyConfig("off");
 		const tool = register();
 		const handle = makeHandle();
-		const { ctx, onTerminalInput, componentRef } = driveWithListener(handle, (done) => {
+		const { ctx, listenerRef, componentRef, scrollBy } = driveWithListener(handle, (done) => {
 			// The footer must not advertise a collapse shortcut that cannot fire (#176).
 			const rendered = componentRef.current!.render(120).join("\n");
 			expect(rendered).not.toContain("to collapse");
 			expect(rendered).toContain("Esc to cancel");
+			// The raw listener is still registered so wheel scrolling keeps working.
+			expect(listenerRef.current?.(CTRL_RBRACKET)).toBeUndefined();
+			expect(handle.isHidden()).toBe(false);
+			expect(listenerRef.current?.(SGR_WHEEL_DOWN)).toEqual({ consume: true });
+			expect(scrollBy).toHaveBeenCalledWith(3);
 			done({ answers: [], cancelled: true });
 		});
 		await tool.execute?.("tc", params as never, undefined as never, undefined as never, ctx);
-		expect(onTerminalInput).not.toHaveBeenCalled();
+	});
+
+	it("forwards wheel notches to the transcript while focused and ignores them while collapsed", async () => {
+		const tool = register();
+		const handle = makeHandle();
+		const { ctx, listenerRef, scrollBy } = driveWithListener(handle, (done) => {
+			// +3 lines per notch down, -3 up.
+			expect(listenerRef.current?.(SGR_WHEEL_DOWN)).toEqual({ consume: true });
+			expect(listenerRef.current?.(SGR_WHEEL_UP)).toEqual({ consume: true });
+			expect(scrollBy.mock.calls).toEqual([[3], [-3]]);
+			// Collapsed (hidden): the host owns wheel scrolling; stay out of its way.
+			handle.setHidden(true);
+			expect(listenerRef.current?.(SGR_WHEEL_DOWN)).toBeUndefined();
+			done({ answers: [], cancelled: true });
+		});
+		await tool.execute?.("tc", params as never, undefined as never, undefined as never, ctx);
+	});
+
+	it("leaves wheel to another overlay when the questionnaire is visible but unfocused", async () => {
+		const tool = register();
+		const handle = makeHandle({ isFocused: () => false });
+		const { ctx, listenerRef, scrollBy } = driveWithListener(handle, (done) => {
+			expect(listenerRef.current?.(SGR_WHEEL_DOWN)).toBeUndefined();
+			expect(scrollBy).not.toHaveBeenCalled();
+			done({ answers: [], cancelled: true });
+		});
+		await tool.execute?.("tc", params as never, undefined as never, undefined as never, ctx);
 	});
 });

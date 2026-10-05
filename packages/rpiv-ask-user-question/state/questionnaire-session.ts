@@ -10,6 +10,14 @@ import { t } from "./i18n-bridge.js";
 import { type QuestionnaireAction, routeKey } from "./key-router.js";
 import type { QuestionnaireRuntime, QuestionnaireState } from "./state.js";
 import { type ApplyContext, type Effect, reduce } from "./state-reducer.js";
+import {
+	matchTranscriptScrollKey,
+	resolveScrollLines,
+	type ScrollCapableTui,
+	scrollTranscript,
+	WHEEL_SCROLL_LINES,
+	type WheelDirection,
+} from "./transcript-scroll.js";
 
 export interface QuestionnaireSessionConfig {
 	tui: TUI;
@@ -149,6 +157,10 @@ export class QuestionnaireSession {
 
 	dispatch(data: string): void {
 		if (this.inputEditorOpen) return;
+		// No-modifier scroll passthrough: Pi's alt-screen TUI defers viewport page
+		// scrolling to the focused overlay, so forward the page keys the host would
+		// otherwise swallow to the transcript instead of treating them as ignored.
+		if (this.scrollTranscriptForKey(data)) return;
 		const action = routeKey(data, this.state, this.runtime());
 		if (action.kind === "ignore") {
 			this.handleIgnoreInline(data);
@@ -269,6 +281,42 @@ export class QuestionnaireSession {
 	 */
 	setOverlayHandle(handle: OverlayHandle): void {
 		this.overlayHandle = handle;
+	}
+
+	private scrollTui(): ScrollCapableTui {
+		return this.tui as unknown as ScrollCapableTui;
+	}
+
+	/** Forwards a matched alt-screen page/line scroll key to the transcript. */
+	private scrollTranscriptForKey(data: string): boolean {
+		const intent = matchTranscriptScrollKey((d, name) => this.keybindings.matches(d, name), data);
+		if (!intent) return false;
+		const tui = this.scrollTui();
+		return scrollTranscript(tui, resolveScrollLines(intent, tui, this.transcriptVisibleRows()));
+	}
+
+	/**
+	 * Transcript rows not covered by the dialog. The overlay is bottom-anchored, so its
+	 * last rendered top row is exactly the uncovered height; a page should advance by
+	 * that much rather than the full terminal, which overshoots by the dialog's height.
+	 * Undefined before the first render, letting page sizing fall back to the terminal.
+	 */
+	private transcriptVisibleRows(): number | undefined {
+		// `getBounds` is a host-provided extension of OverlayHandle (present in current
+		// Pi, absent from the pinned dev types), so read it structurally.
+		const handle = this.overlayHandle as unknown as { getBounds?: () => { row?: number } | undefined } | undefined;
+		const row = handle?.getBounds?.()?.row;
+		return typeof row === "number" ? Math.max(1, row) : undefined;
+	}
+
+	/**
+	 * Raw wheel-passthrough entry used by the `ctx.ui.onTerminalInput` listener in
+	 * `execute()`. A wheel sequence outside the overlay's rendered bounds never reaches
+	 * its `component.handleMouse`, and the host defers viewport wheel to the focused
+	 * overlay, so the raw terminal listener is the only uniform interception point.
+	 */
+	scrollByWheel(direction: WheelDirection): boolean {
+		return scrollTranscript(this.scrollTui(), direction * WHEEL_SCROLL_LINES);
 	}
 
 	/**

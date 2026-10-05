@@ -7,6 +7,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `PageUp` / `PageDown` and the mouse wheel now scroll the chat transcript behind the open dialog, and the dialog reserves the transcript's scrollbar column so its thumb stays visible beside it. Previously the fullscreen TUI handed viewport scrolling to the focused overlay, so the transcript stopped responding while the dialog was up and `Ctrl+]` collapse was the only way to read it.
+
 ## [2.12.0] - 2026-09-30
 
 ### Fixed

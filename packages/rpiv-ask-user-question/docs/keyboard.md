@@ -17,8 +17,17 @@ adapts to the size of your terminal.
 | `Ctrl+G` | Open Pi's configured external editor with the current custom-answer draft. | `Type something.` input |
 | `Ctrl+U` | Clear the current custom-answer draft. | `Type something.` input |
 | `Ctrl+]` | Collapse or expand the dialog. Configurable via `collapseKey`. | Everywhere, including while collapsed |
+| `PageUp` / `PageDown` | Scroll the chat transcript behind the dialog. | Fullscreen, while the dialog is visible |
+| mouse wheel | Scroll the chat transcript behind the dialog. | Fullscreen, while the dialog is visible |
 
 The table names the default keys; the dialog actually follows your Pi keybindings.
+
+Pi's fullscreen TUI routes viewport scrolling to the focused overlay, so a modal blocks
+the transcript. This dialog uses none of Pi's scroll keys itself, so it forwards
+`PageUp` / `PageDown` and the wheel to the transcript instead — no modifier, and the
+dialog's own navigation is untouched. The host's `tui.altScreen.*` bindings are honoured,
+and regular (main-screen) mode needs no forwarding since the terminal owns scrollback.
+
 Confirm listens to both `tui.select.confirm` and `tui.input.submit`, and a key bound to
 `tui.input.newLine` always inserts a newline even if it also matches confirm. So a
 Slack-style configuration — `enter` folded into `tui.input.newLine`, submit moved to
@@ -77,6 +86,10 @@ stack and shrinks to a single dim hint row, so the transcript it was covering be
 readable and chat scrolling resumes. Press the same key to bring the questionnaire back
 with your answers intact. The first time you collapse, Pi notifies you with the key to
 press — that message names your configured key.
+
+Collapse is no longer required just to read the transcript — `PageUp` / `PageDown` and
+the wheel scroll it while the dialog is visible. It remains the escape hatch when you
+want the chat editor focused, or the transcript and the dialog's full height at once.
 
 Because Pi routes no input to a hidden overlay, the collapse key is additionally captured
 at the raw terminal level. It only acts when the questionnaire is hidden or focused, so a

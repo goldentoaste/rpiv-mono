@@ -18,6 +18,7 @@ import {
 import { type DialogUI, hasDialogUI, runRpcQuestionnaire } from "./rpc-fallback.js";
 import { displayLabel, t } from "./state/i18n-bridge.js";
 import { sentinelsToAppend } from "./state/row-intent.js";
+import { parseWheelSequence } from "./state/transcript-scroll.js";
 import { normalizeQuestionParams } from "./tool/normalize-params.js";
 import { buildQuestionnaireResponse, buildToolResult } from "./tool/response-envelope.js";
 import {
@@ -145,26 +146,44 @@ export async function loadQuestionnaireSession(): Promise<SessionLoad> {
 }
 
 /**
- * Register the raw terminal listener that toggles collapse while the overlay is hidden.
- * Returns the remover, or undefined when the key is off / the host has no raw input hook —
- * callers derive `canReopenWhileHidden` from that.
+ * Register the raw terminal listener that owns gestures the focused-overlay path
+ * cannot see: the collapse toggle (pi-tui routes no input to a hidden overlay) and
+ * wheel scrolling (Pi's alt-screen TUI defers viewport wheel to the focused overlay,
+ * and a wheel outside the overlay's bounds never reaches its component).
+ *
+ * Registered whenever the host exposes raw input, even with the collapse key `off`,
+ * because wheel passthrough stays useful then. Callers derive `canReopenWhileHidden`
+ * from the collapse key instead of this return value.
  */
-function registerCollapseKeyListener(
+function registerOverlayRawInputListener(
 	ctx: ExtensionContext,
 	collapseKey: string,
 	sessionRef: SessionRef,
 	overlayHandleRef: OverlayHandleRef,
 ): (() => void) | undefined {
-	if (collapseKey === COLLAPSE_KEY_OFF || typeof ctx.ui.onTerminalInput !== "function") return undefined;
+	if (typeof ctx.ui.onTerminalInput !== "function") return undefined;
+	const collapseEnabled = collapseKey !== COLLAPSE_KEY_OFF;
 	let hasAnnouncedHide = false;
 	return ctx.ui.onTerminalInput((data) => {
 		const handle = overlayHandleRef.current;
 		if (!handle) return undefined;
 		// Only act while the questionnaire is hidden (its handleInput is
 		// unreachable) or actually focused. When some other overlay is on
-		// top (e.g. `/btw`), leave the keystroke to that overlay instead of
-		// toggling the questionnaire from underneath it.
-		if (!handle.isHidden() && !handle.isFocused()) return undefined;
+		// top (e.g. `/btw`), leave the gesture to that overlay instead of
+		// acting on the questionnaire underneath it.
+		const hidden = handle.isHidden();
+		if (!hidden && !handle.isFocused()) return undefined;
+
+		// Wheel passthrough: scroll the transcript behind the visible overlay.
+		// While hidden the host already owns wheel scrolling, so skip it here.
+		if (!hidden) {
+			const direction = parseWheelSequence(data);
+			if (direction !== undefined) {
+				return sessionRef.current?.scrollByWheel(direction) ? { consume: true } : undefined;
+			}
+		}
+
+		if (!collapseEnabled) return undefined;
 		if (!matchesKey(data, collapseKey as Parameters<typeof matchesKey>[1])) return undefined;
 		// Kitty-protocol terminals report press, repeat, and release separately.
 		// Toggle only on the initial press so a tap does not immediately reopen
@@ -355,16 +374,22 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 			const collapseKey = resolveCollapseKey(loadConfig());
 
 			// Capture the overlay handle so the session can call `setHidden()` when the
-			// user toggles collapse, and register a raw terminal input listener for the
-			// same key so the toggle still works while the overlay is hidden (pi-tui does
-			// not route input to a hidden overlay's `component.handleInput`).
+			// user toggles collapse, and register the raw terminal listener that owns
+			// gestures the focused-overlay path cannot see: the collapse toggle (pi-tui
+			// routes no input to a hidden overlay) and wheel passthrough (the host defers
+			// viewport wheel to the focused overlay).
 			const sessionRef: SessionRef = { current: null };
 			const overlayHandleRef: OverlayHandleRef = { current: undefined };
-			const removeOverlayInputListener = registerCollapseKeyListener(ctx, collapseKey, sessionRef, overlayHandleRef);
-			// Hiding the overlay is only reversible through the raw listener above, so
-			// the session may emit `setHidden` only when it was actually registered;
-			// otherwise collapse falls back to the visible one-line row.
-			const canReopenWhileHidden = removeOverlayInputListener !== undefined;
+			const removeOverlayInputListener = registerOverlayRawInputListener(
+				ctx,
+				collapseKey,
+				sessionRef,
+				overlayHandleRef,
+			);
+			// Hiding the overlay is only reversible while the collapse shortcut is
+			// enabled and the host exposes raw terminal input to reopen it; otherwise
+			// collapse falls back to the visible one-line row.
+			const canReopenWhileHidden = collapseKey !== COLLAPSE_KEY_OFF && removeOverlayInputListener !== undefined;
 
 			emitAskUserBlockedEvent(pi, true);
 			try {
@@ -385,7 +410,11 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 							anchor: "bottom-center",
 							width: "100%",
 							maxHeight: "100%",
-							margin: { left: 0, right: 0, bottom: 0 },
+							// Reserve the terminal's last column so the fullscreen transcript
+							// scrollbar stays visible beside the dialog instead of being
+							// composited over. `width: "100%"` clamps to the remaining width,
+							// so the dialog is still full-width and resize-adaptive.
+							margin: { left: 0, right: 1, bottom: 0 },
 						},
 						onHandle: (handle) => {
 							overlayHandleRef.current = handle;
